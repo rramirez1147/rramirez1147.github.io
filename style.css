@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; --accent: #f08a24; }
+body {
+    margin: 0;
+    font: 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+main { max-width: 680px; margin: 0 auto; padding: 48px 24px 64px; }
+.brand { font-weight: 800; letter-spacing: 0.25em; font-size: 13px; color: var(--accent); margin: 0 0 8px; }
+h1 { font-size: 34px; line-height: 1.15; margin: 0 0 8px; }
+h2 { font-size: 21px; margin: 36px 0 8px; }
+h3 { font-size: 17px; margin: 24px 0 4px; }
+a { color: var(--accent); }
+.muted { opacity: 0.6; }
+li { margin: 6px 0; }
