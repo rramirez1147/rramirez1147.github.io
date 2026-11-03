@@ -167,12 +167,39 @@ function recommendationSection(candidate) {
 
 function confirmedSection() {
     const final = state.candidates.find((c) => c.id === state.event.finalized_candidate_id);
-    return [
+    const parts = [
         el("h2", {}, "It’s Set"),
         el("div", { class: "card" }, el("div", { class: "row" },
             el("strong", {}, final ? slotText(final) : "The organizer has picked a time."),
         )),
     ];
+    if (final) {
+        const link = el("a", { class: "primary button", href: calendarFile(state.event, final), download: "availia-event.ics" }, "Add to Calendar");
+        parts.push(link);
+    }
+    return parts;
+}
+
+// A calendar file (.ics) for the confirmed time. iPhone and Mac open it straight into Calendar.
+function calendarFile(event, slot) {
+    const stamp = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const escape = (text) => String(text ?? "").replace(/[\\;,]/g, (c) => `\\${c}`).replace(/\n/g, "\\n");
+    const lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Availia//EN",
+        "BEGIN:VEVENT",
+        `UID:${slot.id}@availia`,
+        `DTSTAMP:${stamp(new Date().toISOString())}`,
+        `DTSTART:${stamp(slot.start_time)}`,
+        `DTEND:${stamp(slot.end_time)}`,
+        `SUMMARY:${escape(event.title)}`,
+        event.location ? `LOCATION:${escape(event.location)}` : null,
+        event.description ? `DESCRIPTION:${escape(event.description)}` : null,
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ].filter(Boolean);
+    return URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/calendar" }));
 }
 
 function pollSection() {

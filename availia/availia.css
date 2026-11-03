@@ -80,3 +80,7 @@ button.primary:disabled { opacity: 0.5; cursor: default; }
 
 .banner { background: var(--card); border-radius: 12px; padding: 14px 16px; margin-top: 16px; }
 .banner.success { border-left: 4px solid var(--success); }
+a.primary.button {
+    display: block; text-align: center; text-decoration: none; margin-top: 16px; padding: 14px;
+    border-radius: 14px; background: var(--accent); color: #fff; font-weight: 600;
+}
