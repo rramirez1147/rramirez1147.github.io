@@ -82,13 +82,14 @@ async function load() {
         supabase.from("candidate_votes").select("candidate_id, vote").eq("participant_id", state.participantID),
         supabase.from("event_items").select("id, title, claimed_by").eq("event_id", eventID).order("created_at"),
         supabase.from("event_updates").select("id, body, created_at").eq("event_id", eventID).order("created_at", { ascending: false }),
-        supabase.from("event_participants").select("id, display_name").eq("event_id", eventID),
+        supabase.from("event_participants").select("id, display_name, participation_status").eq("event_id", eventID),
     ]);
     for (const result of [event, windows, candidates, votes]) if (result.error) throw result.error;
     // The Bring list and updates are extras; leave them empty rather than failing.
     state.items = items.data ?? [];
     state.updates = updates.data ?? [];
     state.names = new Map((people.data ?? []).map((p) => [p.id, p.display_name || "Guest"]));
+    state.participation = (people.data ?? []).find((p) => p.id === state.participantID)?.participation_status;
 
     state.event = event.data;
     state.windows = windows.data.filter((w) => w.availability_type === "available");
@@ -246,10 +247,35 @@ function confirmedSection() {
         )),
     ];
     if (final) {
+        parts.push(...rsvpSection());
         const link = el("a", { class: "primary button", href: calendarFile(state.event, final), download: "availia-event.ics" }, "Add to Calendar");
         parts.push(link);
     }
     return parts;
+}
+
+// Going, not sure, or can't go. "Can't go" lets the host know.
+function rsvpSection() {
+    const current = state.participation ?? "undecided";
+    const choices = [["attending", "I’m In"], ["undecided", "Not Sure"], ["not_attending", "Can’t Go"]];
+    const buttons = choices.map(([value, label]) => {
+        const button = el("button", { type: "button", "aria-pressed": String(current === value) }, label);
+        button.addEventListener("click", () => rsvp(value));
+        return button;
+    });
+    return [
+        el("h2", {}, "Are You Going?"),
+        el("div", { class: "card" }, el("div", { class: "row" }, el("div", { class: "choices", role: "group", "aria-label": "Are you going?" }, ...buttons))),
+    ];
+}
+
+async function rsvp(value) {
+    const { error } = await supabase.from("event_participants")
+        .update({ participation_status: value })
+        .eq("id", state.participantID);
+    state.notice = error ? friendly(error) : value === "attending" ? "See you there!" : value === "not_attending" ? "Thanks for letting them know." : "Saved.";
+    await load();
+    showMain();
 }
 
 // A calendar file (.ics) for the confirmed time. iPhone and Mac open it straight into Calendar.
@@ -297,7 +323,9 @@ function pollSection() {
     return [
         el("h2", {}, "Help Pick a Time"),
         el("div", { class: "card" }, ...rows),
-        el("p", { class: "footnote" }, "These times work equally well, so the group is voting. Only the organizer sees who voted for what."),
+        el("p", { class: "footnote" }, state.event.poll_deadline && new Date(state.event.poll_deadline) > new Date()
+            ? `These times work equally well, so the group is voting until ${new Date(state.event.poll_deadline).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })}. Only the host sees who voted for what.`
+            : "These times work equally well, so the group is voting. Only the host sees who voted for what."),
     ];
 }
 
