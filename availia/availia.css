@@ -84,3 +84,10 @@ a.primary.button {
     display: block; text-align: center; text-decoration: none; margin-top: 16px; padding: 14px;
     border-radius: 14px; background: var(--accent); color: #fff; font-weight: 600;
 }
+
+/* Text pages: privacy policy, support, and the home page. */
+.page h1 { margin-top: 4px; }
+.page h2 { text-transform: none; font-size: 21px; font-weight: 700; color: inherit; margin: 32px 4px 8px; }
+.page p, .page ul { margin: 0 4px 12px; }
+.page li { margin: 6px 0; }
+.page a { color: var(--accent); }
