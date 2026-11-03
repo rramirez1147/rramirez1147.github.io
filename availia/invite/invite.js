@@ -26,6 +26,16 @@ const state = {
     candidates: [],
     votes: new Map(),   // candidate id → "yes" | "no" | "tentative"
     notice: null,       // a message shown after saving
+    items: [],          // the Bring list
+    updates: [],        // messages from the host
+    names: new Map(),   // participant id → name, for the Bring list
+};
+
+// Cover colors, matching the app. Only these known values are ever used in styles.
+const palettes = {
+    blue: ["#3d8fff", "#1f52db"], orange: ["#ffa845", "#f2612e"], pink: ["#ff8cb8", "#e04585"],
+    purple: ["#a87aff", "#6b40db"], green: ["#5cd17a", "#21945c"], teal: ["#47d1db", "#1a85a8"],
+    red: ["#ff6b66", "#d1293d"], gray: ["#8c94a3", "#4d5261"],
 };
 
 start();
@@ -63,15 +73,22 @@ async function claim(name) {
 
 async function load() {
     const eventID = state.invitation.event_id;
-    const [event, windows, candidates, votes] = await Promise.all([
+    const [event, windows, candidates, votes, items, updates, people] = await Promise.all([
         supabase.from("events").select("*").eq("id", eventID).single(),
         supabase.from("availability_windows").select("start_time, end_time, availability_type")
             .eq("participant_id", state.participantID),
         supabase.from("candidate_slots").select("*").eq("event_id", eventID).in("status", ["active", "finalized"])
             .order("is_recommended", { ascending: false }).order("ranking_score", { ascending: false }),
         supabase.from("candidate_votes").select("candidate_id, vote").eq("participant_id", state.participantID),
+        supabase.from("event_items").select("id, title, claimed_by").eq("event_id", eventID).order("created_at"),
+        supabase.from("event_updates").select("id, body, created_at").eq("event_id", eventID).order("created_at", { ascending: false }),
+        supabase.from("event_participants").select("id, display_name").eq("event_id", eventID),
     ]);
     for (const result of [event, windows, candidates, votes]) if (result.error) throw result.error;
+    // The Bring list and updates are extras; leave them empty rather than failing.
+    state.items = items.data ?? [];
+    state.updates = updates.data ?? [];
+    state.names = new Map((people.data ?? []).map((p) => [p.id, p.display_name || "Guest"]));
 
     state.event = event.data;
     state.windows = windows.data.filter((w) => w.availability_type === "available");
@@ -113,8 +130,9 @@ function showWelcome() {
     });
 
     render(
+        coverView(inv),
         el("h1", {}, inv.title),
-        el("p", { class: "lead" }, `${inv.organizer_name || "A friend"} wants to find a time that works for everyone.`),
+        el("p", { class: "lead" }, `${inv.organizer_name || "A friend"} invited you and wants to find a time that works for everyone.`),
         detailsCard(inv),
         el("h2", {}, "Your Name"),
         el("div", { class: "card" }, el("div", { class: "row" }, name)),
@@ -127,9 +145,10 @@ function showWelcome() {
 
 function showMain() {
     const event = state.event;
-    const parts = [el("h1", {}, event.title), detailsCard(event)];
+    const parts = [coverView(event), el("h1", {}, event.title), detailsCard(event)];
 
     if (state.notice) parts.push(el("div", { class: "banner success" }, state.notice));
+    if (state.updates.length) parts.push(...updatesSection());
 
     if (event.status === "cancelled") {
         parts.push(el("div", { class: "banner" }, "This event was cancelled."));
@@ -141,7 +160,51 @@ function showMain() {
         else if (recommended) parts.push(...recommendationSection(recommended));
         parts.push(...availabilitySection());
     }
+    if (state.items.length && event.status !== "cancelled") parts.push(...bringSection());
     render(...parts);
+}
+
+// The invitation's cover: an emoji on the host's chosen colors.
+function coverView(event) {
+    const [from, to] = palettes[event.cover_palette] ?? palettes.blue;
+    const cover = el("div", { class: "cover", "aria-hidden": "true" }, event.cover_emoji || "📅");
+    cover.style.background = `linear-gradient(135deg, ${from}, ${to})`;
+    return cover;
+}
+
+function updatesSection() {
+    return [
+        el("h2", {}, "Updates from the Host"),
+        el("div", { class: "card" }, ...state.updates.map((u) => el("div", { class: "row stacked" },
+            el("span", {}, u.body),
+            el("span", { class: "footnote", style: "margin:0" }, new Date(u.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })),
+        ))),
+    ];
+}
+
+// Things to bring. Tap an open item to bring it, or your own to give it back.
+function bringSection() {
+    const rows = state.items.map((item) => {
+        const mine = item.claimed_by === state.participantID;
+        const taken = item.claimed_by && !mine;
+        const button = el("button", { type: "button", class: "small", disabled: taken }, mine ? "You’re bringing it" : taken ? state.names.get(item.claimed_by) ?? "Taken" : "I’ll bring it");
+        if (!taken) button.addEventListener("click", () => claimItem(item, !mine));
+        return el("div", { class: "row" }, el("span", { class: "label" }, item.title), button);
+    });
+    return [
+        el("h2", {}, "Bring"),
+        el("div", { class: "card" }, ...rows),
+        el("p", { class: "footnote" }, "Tap an item to say you’ll bring it."),
+    ];
+}
+
+async function claimItem(item, claim) {
+    const { error } = await supabase.from("event_items")
+        .update({ claimed_by: claim ? state.participantID : null })
+        .eq("id", item.id);
+    state.notice = error ? "Someone may have just taken that one. Try another." : claim ? `Thanks for bringing ${item.title.toLowerCase()}!` : "Okay, it’s open for someone else.";
+    await load();
+    showMain();
 }
 
 function detailsCard(event) {
@@ -149,7 +212,16 @@ function detailsCard(event) {
         row("Dates", dateRange(event.search_start, event.search_end)),
         row("Length", duration(event.duration_minutes)),
     ];
-    if (event.location) rows.push(row("Location", event.location));
+    if (event.location) {
+        if (event.latitude != null && event.longitude != null) {
+            // Apple Maps opens the Maps app on iPhone and a web map elsewhere.
+            const url = `https://maps.apple.com/?ll=${event.latitude},${event.longitude}&q=${encodeURIComponent(event.location)}`;
+            const link = el("a", { href: url, target: "_blank", rel: "noopener" }, event.location);
+            rows.push(el("div", { class: "row" }, el("span", { class: "label" }, "Location"), el("span", { class: "value" }, link)));
+        } else {
+            rows.push(row("Location", event.location));
+        }
+    }
     if (event.description) rows.push(el("div", { class: "row muted" }, event.description));
     return el("div", { class: "card" }, ...rows);
 }

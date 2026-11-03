@@ -91,3 +91,14 @@ a.primary.button {
 .page p, .page ul { margin: 0 4px 12px; }
 .page li { margin: 6px 0; }
 .page a { color: var(--accent); }
+
+.cover {
+    height: 170px; border-radius: 20px; margin-bottom: 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 72px; line-height: 1;
+}
+button.small {
+    border: 0; border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 15px;
+    background: rgba(120, 120, 128, 0.12); color: var(--accent); cursor: pointer;
+}
+button.small:disabled { color: var(--secondary); cursor: default; }
