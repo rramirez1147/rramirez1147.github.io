@@ -1,10 +1,10 @@
-// The page friends open from their invitation link. They can share availability and, if the group
-// needs to decide, vote, all without the app or an account.
+// The page friends open from their invitation link. They can say when they're free and, once the
+// time is set, let the host know if they can't make it, all without the app or an account.
 //
 // How it works: the link carries a secret token. The guest signs in anonymously, then
 // claim_invitation links that anonymous session to their spot in the event. From then on the
 // database's privacy rules treat them like any participant: they can see the event and their own
-// availability and votes, never anyone else's.
+// availability, never anyone else's.
 //
 // The Supabase address and publishable key below are meant to be public.
 
@@ -24,7 +24,6 @@ const state = {
     event: null,
     windows: [],        // your saved availability
     candidates: [],
-    votes: new Map(),   // candidate id → "yes" | "no" | "tentative"
     notice: null,       // a message shown after saving
     items: [],          // the Bring list
     updates: [],        // messages from the host
@@ -66,18 +65,17 @@ async function claim(name) {
 
 async function load() {
     const eventID = state.invitation.event_id;
-    const [event, windows, candidates, votes, items, updates, people] = await Promise.all([
+    const [event, windows, candidates, items, updates, people] = await Promise.all([
         supabase.from("events").select("*").eq("id", eventID).single(),
         supabase.from("availability_windows").select("start_time, end_time, availability_type")
             .eq("participant_id", state.participantID),
         supabase.from("candidate_slots").select("*").eq("event_id", eventID).in("status", ["active", "finalized"])
             .order("is_recommended", { ascending: false }).order("ranking_score", { ascending: false }),
-        supabase.from("candidate_votes").select("candidate_id, vote").eq("participant_id", state.participantID),
         supabase.from("event_items").select("id, title, claimed_by").eq("event_id", eventID).order("created_at"),
         supabase.from("event_updates").select("id, body, created_at").eq("event_id", eventID).order("created_at", { ascending: false }),
         supabase.from("event_participants").select("id, display_name, participation_status").eq("event_id", eventID),
     ]);
-    for (const result of [event, windows, candidates, votes]) if (result.error) throw result.error;
+    for (const result of [event, windows, candidates]) if (result.error) throw result.error;
     // The Bring list and updates are extras; leave them empty rather than failing.
     state.items = items.data ?? [];
     state.updates = updates.data ?? [];
@@ -87,7 +85,6 @@ async function load() {
     state.event = event.data;
     state.windows = windows.data.filter((w) => w.availability_type === "available");
     state.candidates = candidates.data;
-    state.votes = new Map(votes.data.map((v) => [v.candidate_id, v.vote]));
 }
 
 // MARK: - Screens
@@ -96,11 +93,22 @@ function showProblem(message) {
     render(el("h1", {}, "Hmm."), el("p", { class: "lead" }, message));
 }
 
+// The host already typed the guest's name, so greet them by it. "Not Sam?" lets them change it.
 function showWelcome() {
     const inv = state.invitation;
-    const name = el("input", { type: "text", placeholder: "Your name", autocomplete: "given-name", maxlength: "60" });
-    const button = el("button", { class: "primary", disabled: true }, "Continue");
+    const known = (inv.guest_name || "").trim();
+    const name = el("input", { type: "text", placeholder: "Your name", autocomplete: "given-name", maxlength: "60", value: known });
+    const nameCard = el("div", { class: "card", hidden: Boolean(known) }, el("div", { class: "row" }, name));
+    const button = el("button", { class: "primary", disabled: !known }, "Continue");
     const problem = el("p", { class: "footnote error", hidden: true });
+    const notMe = el("button", { type: "button", class: "link" }, `Not ${known}?`);
+    notMe.addEventListener("click", () => {
+        name.value = "";
+        nameCard.hidden = false;
+        notMe.hidden = true;
+        button.disabled = true;
+        name.focus();
+    });
 
     name.addEventListener("input", () => { button.disabled = !name.value.trim(); });
     button.addEventListener("click", async () => {
@@ -113,7 +121,9 @@ function showWelcome() {
                 const { error } = await supabase.auth.signInAnonymously();
                 if (error) throw error;
             }
-            await claim(name.value.trim());
+            // Keeping the host's spelling sends no name, so it isn't changed.
+            const typed = name.value.trim();
+            await claim(typed && typed !== known ? typed : null);
             showMain();
         } catch (error) {
             problem.textContent = friendly(error);
@@ -124,51 +134,37 @@ function showWelcome() {
     });
 
     render(
-        coverView(inv),
-        el("h1", {}, inv.title),
-        el("p", { class: "lead" }, `${inv.organizer_name || "A friend"} invited you and wants to find a time that works for everyone.`),
+        el("h1", {}, known ? `Hi ${known}!` : inv.title),
+        el("p", { class: "lead" }, known
+            ? `${inv.organizer_name || "A friend"} invited you to “${inv.title}” and wants to find a time that works for everyone.`
+            : `${inv.organizer_name || "A friend"} invited you and wants to find a time that works for everyone.`),
         detailsCard(inv),
-        el("h2", {}, "Your Name"),
-        el("div", { class: "card" }, el("div", { class: "row" }, name)),
-        el("p", { class: "footnote" }, "So the organizer knows who responded. You don’t need an account or the app."),
+        nameCard,
+        known ? notMe : el("p", { class: "footnote" }, "So the organizer knows who responded. You don’t need an account or the app."),
         problem,
         button,
     );
-    name.focus();
+    if (!known) name.focus();
 }
 
 function showMain() {
     const event = state.event;
-    const parts = [coverView(event), el("h1", {}, event.title), detailsCard(event)];
+    const parts = [el("h1", {}, event.title), detailsCard(event)];
 
     if (state.notice) parts.push(el("div", { class: "banner success" }, state.notice));
-    if (state.updates.length) parts.push(...updatesSection());
 
     if (event.status === "cancelled") {
         parts.push(el("div", { class: "banner" }, "This event was cancelled."));
     } else if (event.status === "confirmed") {
+        // Once there's a time: the time, whether you can make it, and then the extras.
         parts.push(...confirmedSection());
+        if (state.updates.length) parts.push(...updatesSection());
+        if (state.items.length) parts.push(...bringSection());
     } else {
-        const recommended = state.candidates.find((c) => c.is_recommended && c.status === "active");
-        if (event.status === "awaiting_group_decision") parts.push(...pollSection());
-        else if (recommended) parts.push(...recommendationSection(recommended));
+        // Before then, just the one thing to do: say when you're free.
         parts.push(...availabilitySection());
     }
-    if (state.items.length && event.status !== "cancelled") parts.push(...bringSection());
     render(...parts);
-}
-
-// The event's cover photo, like in the app. Events without one have no cover. The photo is
-// private, so it only loads once the guest has claimed their spot.
-function coverView(event) {
-    if (!event.cover_image_path || !state.participantID) return null;
-    const cover = el("div", { class: "cover", "aria-hidden": "true" });
-    supabase.storage.from("event-covers").download(event.cover_image_path).then(({ data }) => {
-        if (!data) return cover.remove();
-        const image = el("img", { src: URL.createObjectURL(data), alt: "" });
-        cover.append(image);
-    });
-    return cover;
 }
 
 function updatesSection() {
@@ -230,17 +226,6 @@ function detailsCard(event) {
     return el("div", { class: "card" }, ...rows);
 }
 
-function recommendationSection(candidate) {
-    return [
-        el("h2", {}, "Best Time So Far"),
-        el("div", { class: "card" }, el("div", { class: "row stacked" },
-            el("strong", {}, slotText(candidate)),
-            el("span", { class: "muted" }, candidate.selection_reason || ""),
-        )),
-        el("p", { class: "footnote" }, "The organizer will confirm the final time."),
-    ];
-}
-
 function confirmedSection() {
     const final = state.candidates.find((c) => c.id === state.event.finalized_candidate_id);
     const parts = [
@@ -257,18 +242,14 @@ function confirmedSection() {
     return parts;
 }
 
-// Going, not sure, or can't go. "Can't go" lets the host know.
+// Everyone who answered is counted as going. One button lets the host know if you can't make it.
 function rsvpSection() {
-    const current = state.participation ?? "undecided";
-    const choices = [["attending", "I’m In"], ["undecided", "Not Sure"], ["not_attending", "Can’t Go"]];
-    const buttons = choices.map(([value, label]) => {
-        const button = el("button", { type: "button", "aria-pressed": String(current === value) }, label);
-        button.addEventListener("click", () => rsvp(value));
-        return button;
-    });
+    const out = state.participation === "not_attending";
+    const button = el("button", { type: "button", class: "plain" }, out ? "I Can Make It After All" : "Can’t Make It");
+    button.addEventListener("click", () => rsvp(out ? "attending" : "not_attending"));
     return [
-        el("h2", {}, "Are You Going?"),
-        el("div", { class: "card" }, el("div", { class: "row" }, el("div", { class: "choices", role: "group", "aria-label": "Are you going?" }, ...buttons))),
+        el("p", { class: "lead" }, out ? "The host knows you can’t make it." : "You’re going. See you there!"),
+        button,
     ];
 }
 
@@ -303,91 +284,104 @@ function calendarFile(event, slot) {
     return URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/calendar" }));
 }
 
-function pollSection() {
-    const active = state.candidates.filter((c) => c.status === "active");
-    const tied = active.filter((c) => c.is_tied);
-    const options = tied.length ? tied : active;
-    const choices = [["yes", "Yes"], ["tentative", "Maybe"], ["no", "No"]];
+// Parts of the day, as minutes after midnight. Morning starts at midnight and Evening runs to
+// midnight, so trimming them to the event's hours covers early and late events. Matches the app.
+const dayParts = [["Morning", 0, 720], ["Afternoon", 720, 1020], ["Evening", 1020, 1440]];
 
-    const rows = options.map((candidate) => {
-        const buttons = choices.map(([value, label]) => {
-            const button = el("button", { type: "button", "aria-pressed": String(state.votes.get(candidate.id) === value) }, label);
-            button.addEventListener("click", () => vote(candidate, value));
-            return button;
-        });
-        const totals = `${candidate.yes_votes} yes · ${candidate.tentative_votes} maybe · ${candidate.no_votes} no`;
-        return el("div", { class: "row stacked" },
-            el("strong", {}, slotText(candidate)),
-            el("span", { class: "muted" }, totals),
-            el("div", { class: "choices", role: "group", "aria-label": `Vote for ${slotText(candidate)}` }, ...buttons),
-        );
-    });
-
-    return [
-        el("h2", {}, "Help Pick a Time"),
-        el("div", { class: "card" }, ...rows),
-        el("p", { class: "footnote" }, state.event.poll_deadline && new Date(state.event.poll_deadline) > new Date()
-            ? `These times work equally well, so the group is voting until ${new Date(state.event.poll_deadline).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })}. Only the host sees who voted for what.`
-            : "These times work equally well, so the group is voting. Only the host sees who voted for what."),
-    ];
+// The event's hours: the host's preferred times, or 8 AM–10 PM.
+function allowedMinutes(event) {
+    const range = event.preferred_time_ranges?.[0];
+    return range && range.end_minute > range.start_minute ? [range.start_minute, Math.min(range.end_minute, 1440)] : [480, 1320];
 }
 
+// The parts of the day inside the event's hours, trimmed to them. A dinner from 6–10 PM only offers Evening.
+function partsFor(event) {
+    const [from, to] = allowedMinutes(event);
+    return dayParts
+        .map(([name, start, end]) => ({ name, start: Math.max(start, from), end: Math.min(end, to) }))
+        .filter((p) => p.start < p.end);
+}
+
+// Days down the side, parts of the day across. Tap a square, or a day or part of the day to fill
+// the whole row or column.
 function availabilitySection() {
     const event = state.event;
     const preferred = event.preferred_weekdays ?? [];
-    const range = event.preferred_time_ranges?.[0] ?? { start_minute: 18 * 60, end_minute: 22 * 60 };
+    const parts = partsFor(event);
     const today = startOfDay(new Date());
-
     const days = eachDay(event.search_start, event.search_end).filter((day) => day >= today);
-    const rows = days.map((day) => {
-        const saved = state.windows.find((w) => sameDay(new Date(w.start_time), day));
-        const on = el("input", { type: "checkbox", "aria-label": `Free on ${dayText(day)}` });
-        const from = el("input", { type: "time", value: saved ? clock(new Date(saved.start_time)) : minutesToClock(range.start_minute) });
-        const until = el("input", { type: "time", value: saved ? clock(new Date(saved.end_time)) : minutesToClock(range.end_minute) });
-        on.checked = Boolean(saved);
 
-        const times = el("div", { class: "times" }, from, "to", until);
-        const label = el("span", { class: "label" }, dayText(day));
-        if (preferred.includes(day.getDay() + 1)) label.append(el("span", { class: "tag" }, "Preferred"));
-        const line = el("div", { class: "row" + (on.checked ? "" : " disabled") }, on, label, times);
-        const sync = () => {
-            line.classList.toggle("disabled", !on.checked);
-            from.disabled = until.disabled = !on.checked;
-        };
-        on.addEventListener("change", sync);
+    // A saved time turns on every part of the day it covers.
+    const chosen = days.map((day) => parts.map((part) => state.windows.some((w) => {
+        const start = new Date(w.start_time), end = new Date(w.end_time);
+        return sameDay(start, day) && start <= atMinute(day, part.start) && end >= atMinute(day, part.end);
+    })));
+
+    const squares = [];
+    const sync = () => squares.forEach(({ button, d, p }) => button.setAttribute("aria-pressed", String(chosen[d][p])));
+    const toggleAll = (cells) => {
+        const fill = !cells.every(([d, p]) => chosen[d][p]);
+        cells.forEach(([d, p]) => { chosen[d][p] = fill; });
         sync();
-        return { day, on, from, until, line };
+    };
+
+    const header = el("div", { class: "grid-row grid-header" }, el("span", { class: "grid-day" }),
+        ...parts.map((part, p) => {
+            const button = el("button", { type: "button", class: "grid-part", "aria-label": `Every ${part.name}` },
+                el("strong", {}, part.name), el("span", {}, spanText(part)));
+            button.addEventListener("click", () => toggleAll(days.map((_, d) => [d, p])));
+            return button;
+        }));
+
+    const rows = days.map((day, d) => {
+        const label = el("button", { type: "button", class: "grid-day", "aria-label": `All of ${dayText(day)}` },
+            el("strong", {}, day.toLocaleDateString(undefined, { weekday: "short" }), preferred.includes(day.getDay() + 1) ? el("span", { class: "dot", "aria-hidden": "true" }) : null),
+            el("span", {}, day.toLocaleDateString(undefined, { month: "short", day: "numeric" })));
+        label.addEventListener("click", () => toggleAll(parts.map((_, p) => [d, p])));
+        const cells = parts.map((part, p) => {
+            const button = el("button", { type: "button", class: "grid-square", "aria-label": `${dayText(day)}, ${part.name}` });
+            button.addEventListener("click", () => { chosen[d][p] = !chosen[d][p]; sync(); });
+            squares.push({ button, d, p });
+            return button;
+        });
+        return el("div", { class: "grid-row" }, label, ...cells);
     });
+    sync();
 
     const problem = el("p", { class: "footnote error", hidden: true });
-    const button = el("button", { class: "primary" }, state.windows.length ? "Update My Availability" : "Share My Availability");
-    button.addEventListener("click", () => saveAvailability(rows, problem, button));
+    const button = el("button", { class: "primary" }, state.windows.length ? "Update My Times" : "Save My Times");
+    button.addEventListener("click", () => saveAvailability(days, parts, chosen, problem, button));
 
     return [
         el("h2", {}, "When Are You Free?"),
-        rows.length
-            ? el("div", { class: "card" }, ...rows.map((r) => r.line))
+        days.length
+            ? el("div", { class: "card grid", style: `--columns:${parts.length}` }, header, ...rows)
             : el("div", { class: "banner" }, "All the dates for this event have passed."),
-        el("p", { class: "footnote" }, `Check each day you could make it and set the hours. Times are in your time zone. The event lasts ${duration(event.duration_minutes)}. Nobody else sees your free times; Availia only shares the times that work best.`),
+        el("p", { class: "footnote" }, "Tap the times you could make it. Tap a day or a time of day to fill the whole row or column. Nobody else sees your free times."),
         problem,
-        rows.length ? button : el("span"),
+        days.length ? button : null,
     ];
 }
 
 // MARK: - Saving
 
-async function saveAvailability(rows, problem, button) {
+async function saveAvailability(days, parts, chosen, problem, button) {
     const minimum = state.event.duration_minutes;
+    // Each day's chosen parts, joined where they touch.
     const windows = [];
-    for (const r of rows.filter((r) => r.on.checked)) {
-        const start = atClock(r.day, r.from.value);
-        const end = atClock(r.day, r.until.value);
-        if (!start || !end || end - start < minimum * 60_000) {
-            problem.textContent = `On ${dayText(r.day)}, the time you’re free needs to be at least ${duration(minimum)}.`;
-            problem.hidden = false;
-            return;
-        }
-        windows.push({ start, end });
+    days.forEach((day, d) => {
+        let current = null;
+        parts.forEach((part, p) => {
+            if (!chosen[d][p]) return;
+            if (current && current.end === part.start) current.end = part.end;
+            else windows.push(current = { day, start: part.start, end: part.end });
+        });
+    });
+    const tooShort = windows.find((w) => w.end - w.start < minimum);
+    if (tooShort) {
+        problem.textContent = `On ${dayText(tooShort.day)}, that’s shorter than the ${duration(minimum)} event. Pick more of the day.`;
+        problem.hidden = false;
+        return;
     }
     problem.hidden = true;
     button.disabled = true;
@@ -401,8 +395,8 @@ async function saveAvailability(rows, problem, button) {
             result = await supabase.from("availability_windows").insert(windows.map((w) => ({
                 event_id: state.event.id,
                 participant_id: pid,
-                start_time: w.start.toISOString(),
-                end_time: w.end.toISOString(),
+                start_time: atMinute(w.day, w.start).toISOString(),
+                end_time: atMinute(w.day, w.end).toISOString(),
                 source: "manual",
                 availability_type: "available",
             })));
@@ -416,8 +410,8 @@ async function saveAvailability(rows, problem, button) {
         await recalculate();
         await load();
         state.notice = windows.length
-            ? "Thanks! Your availability is saved. Come back to this link anytime to see the time or change your answer."
-            : "Saved. You haven’t picked any days yet.";
+            ? "Thanks! You’re all set. Come back to this link anytime to see the time or change your answer."
+            : "Saved. You haven’t picked any times yet.";
         showMain();
         window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
@@ -428,31 +422,25 @@ async function saveAvailability(rows, problem, button) {
     }
 }
 
-async function vote(candidate, value) {
-    const pid = state.participantID;
-    const row = { event_id: state.event.id, candidate_id: candidate.id, participant_id: pid, vote: value };
-    let { error } = await supabase.from("candidate_votes").insert(row);
-    if (error?.code === "23505") {
-        // Already voted on this time: change the vote instead.
-        ({ error } = await supabase.from("candidate_votes").update({ vote: value })
-            .eq("candidate_id", candidate.id).eq("participant_id", pid));
-    }
-    if (error) {
-        state.notice = friendly(error);
-    } else {
-        await recalculate();
-        state.notice = "Vote saved. You can change it until the poll closes.";
-    }
-    await load();
-    showMain();
-}
-
 // Lets the scheduling engine update the recommendation. Failing here isn't worth bothering the guest.
 async function recalculate() {
     await supabase.functions.invoke("schedule-event", { body: { event_id: state.event.id } }).catch(() => {});
 }
 
 // MARK: - Helpers
+
+// `minutes` after midnight on `day`, in this browser's time zone.
+function atMinute(day, minutes) {
+    const date = new Date(day);
+    date.setHours(0, minutes, 0, 0);
+    return date;
+}
+
+// Such as "5–10 PM".
+function spanText(part) {
+    const start = atMinute(new Date(2000, 0, 1), part.start), end = atMinute(new Date(2000, 0, 1), part.end);
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).formatRange(start, end);
+}
 
 function render(...children) {
     app.replaceChildren(...children.filter((c) => c !== null && c !== undefined));
@@ -519,17 +507,5 @@ function sameDay(a, b) {
     return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-function clock(date) {
-    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
 
-function minutesToClock(minutes) {
-    minutes = Math.min(minutes, 23 * 60 + 59); // A range ending at midnight shows as 11:59 PM.
-    return `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-}
 
-function atClock(day, value) {
-    const [hours, minutes] = value.split(":").map(Number);
-    if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
-    return new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes);
-}
