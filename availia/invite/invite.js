@@ -284,102 +284,96 @@ function calendarFile(event, slot) {
     return URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/calendar" }));
 }
 
-// Parts of the day, as minutes after midnight. Morning starts at midnight and Evening runs to
-// midnight, so trimming them to the event's hours covers early and late events. Matches the app.
-const dayParts = [["Morning", 0, 720], ["Afternoon", 720, 1020], ["Evening", 1020, 1440]];
-
 // The event's hours: the host's preferred times, or 8 AM–10 PM.
 function allowedMinutes(event) {
     const range = event.preferred_time_ranges?.[0];
     return range && range.end_minute > range.start_minute ? [range.start_minute, Math.min(range.end_minute, 1440)] : [480, 1320];
 }
 
-// The parts of the day inside the event's hours, trimmed to them. A dinner from 6–10 PM only offers Evening.
-function partsFor(event) {
-    const [from, to] = allowedMinutes(event);
-    return dayParts
-        .map(([name, start, end]) => ({ name, start: Math.max(start, from), end: Math.min(end, to) }))
-        .filter((p) => p.start < p.end);
-}
-
-// Days down the side, parts of the day across. Tap a square, or a day or part of the day to fill
-// the whole row or column.
+// Each day with the specific times you're free on it. "Add a time" adds one, "Copy to every day"
+// repeats a day's times on the others. Matches the app.
 function availabilitySection() {
     const event = state.event;
     const preferred = event.preferred_weekdays ?? [];
-    const parts = partsFor(event);
+    const [earliest, latest] = allowedMinutes(event);
+    const length = Math.max(event.duration_minutes, 60);
     const today = startOfDay(new Date());
     const days = eachDay(event.search_start, event.search_end).filter((day) => day >= today);
 
-    // A saved time turns on every part of the day it covers.
-    const chosen = days.map((day) => parts.map((part) => state.windows.some((w) => {
-        const start = new Date(w.start_time), end = new Date(w.end_time);
-        return sameDay(start, day) && start <= atMinute(day, part.start) && end >= atMinute(day, part.end);
-    })));
+    // Minutes after midnight for each saved time, by day.
+    const times = days.map((day) => state.windows
+        .filter((w) => sameDay(new Date(w.start_time), day))
+        .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+        .map((w) => ({ from: minutesOf(new Date(w.start_time), day), until: minutesOf(new Date(w.end_time), day) })));
 
-    const squares = [];
-    const sync = () => squares.forEach(({ button, d, p }) => button.setAttribute("aria-pressed", String(chosen[d][p])));
-    const toggleAll = (cells) => {
-        const fill = !cells.every(([d, p]) => chosen[d][p]);
-        cells.forEach(([d, p]) => { chosen[d][p] = fill; });
-        sync();
-    };
-
-    const header = el("div", { class: "grid-row grid-header" }, el("span", { class: "grid-day" }),
-        ...parts.map((part, p) => {
-            const button = el("button", { type: "button", class: "grid-part", "aria-label": `Every ${part.name}` },
-                el("strong", {}, part.name), el("span", {}, spanText(part)));
-            button.addEventListener("click", () => toggleAll(days.map((_, d) => [d, p])));
-            return button;
-        }));
-
-    const rows = days.map((day, d) => {
-        const label = el("button", { type: "button", class: "grid-day", "aria-label": `All of ${dayText(day)}` },
-            el("strong", {}, day.toLocaleDateString(undefined, { weekday: "short" }), preferred.includes(day.getDay() + 1) ? el("span", { class: "dot", "aria-hidden": "true" }) : null),
-            el("span", {}, day.toLocaleDateString(undefined, { month: "short", day: "numeric" })));
-        label.addEventListener("click", () => toggleAll(parts.map((_, p) => [d, p])));
-        const cells = parts.map((part, p) => {
-            const button = el("button", { type: "button", class: "grid-square", "aria-label": `${dayText(day)}, ${part.name}` });
-            button.addEventListener("click", () => { chosen[d][p] = !chosen[d][p]; sync(); });
-            squares.push({ button, d, p });
-            return button;
+    const list = el("div");
+    const draw = () => list.replaceChildren(...days.map((day, d) => {
+        const rows = times[d].map((slot, t) => {
+            const from = el("input", { type: "time", value: clockText(slot.from), "aria-label": `From, ${dayText(day)}` });
+            const until = el("input", { type: "time", value: clockText(slot.until), "aria-label": `Until, ${dayText(day)}` });
+            from.addEventListener("change", () => { slot.from = clockMinutes(from.value) ?? slot.from; draw(); });
+            until.addEventListener("change", () => { slot.until = clockMinutes(until.value) ?? slot.until; draw(); });
+            const remove = el("button", { type: "button", class: "remove", "aria-label": "Remove this time" }, "−");
+            remove.addEventListener("click", () => { times[d].splice(t, 1); draw(); });
+            const note = slotProblem(slot, event.duration_minutes);
+            return el("div", { class: "row stacked" },
+                el("div", { class: "times" }, from, "to", until, remove),
+                note ? el("span", { class: "footnote error", style: "margin:0" }, note) : null);
         });
-        return el("div", { class: "grid-row" }, label, ...cells);
-    });
-    sync();
+        const add = el("button", { type: "button", class: "add" }, "+ Add a time");
+        add.addEventListener("click", () => {
+            const last = times[d][times[d].length - 1];
+            const earlier = times.slice(0, d).reverse().find((list) => list.length)?.[0];
+            let from = last ? last.until : earlier ? earlier.from : earliest;
+            let until = last ? from + length : earlier ? earlier.until : from + length;
+            until = Math.min(until, latest);
+            from = Math.min(from, Math.max(earliest, until - length));
+            times[d].push({ from, until });
+            draw();
+        });
+        const header = el("div", { class: "day-header" },
+            el("span", {}, day.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })),
+            preferred.includes(day.getDay() + 1) ? el("span", { class: "tag" }, "Preferred") : null);
+        if (times[d].length) {
+            const copy = el("button", { type: "button", class: "small" }, "Copy to every day");
+            copy.addEventListener("click", () => {
+                days.forEach((_, other) => { if (other !== d) times[other] = times[d].map((slot) => ({ ...slot })); });
+                draw();
+            });
+            header.append(copy);
+        }
+        return el("div", {}, header, el("div", { class: "card" }, ...rows, el("div", { class: "row" }, add)));
+    }));
+    draw();
 
     const problem = el("p", { class: "footnote error", hidden: true });
     const button = el("button", { class: "primary" }, state.windows.length ? "Update My Times" : "Save My Times");
-    button.addEventListener("click", () => saveAvailability(days, parts, chosen, problem, button));
+    button.addEventListener("click", () => saveAvailability(days, times, problem, button));
 
     return [
         el("h2", {}, "When Are You Free?"),
-        days.length
-            ? el("div", { class: "card grid", style: `--columns:${parts.length}` }, header, ...rows)
-            : el("div", { class: "banner" }, "All the dates for this event have passed."),
-        el("p", { class: "footnote" }, "Tap the times you could make it. Tap a day or a time of day to fill the whole row or column. Nobody else sees your free times."),
+        el("p", { class: "footnote" }, `Add the times you could make it. The event is ${duration(event.duration_minutes)}, so each time should be at least that long. Nobody else sees your times.`),
+        days.length ? list : el("div", { class: "banner" }, "All the dates for this event have passed."),
         problem,
         days.length ? button : null,
     ];
 }
 
+// What's wrong with a time, if anything.
+function slotProblem(slot, minimum) {
+    if (slot.until <= slot.from) return "This ends before it starts.";
+    if (slot.until - slot.from < minimum) return `Shorter than the ${duration(minimum)} event.`;
+    return null;
+}
+
 // MARK: - Saving
 
-async function saveAvailability(days, parts, chosen, problem, button) {
+async function saveAvailability(days, times, problem, button) {
     const minimum = state.event.duration_minutes;
-    // Each day's chosen parts, joined where they touch.
-    const windows = [];
-    days.forEach((day, d) => {
-        let current = null;
-        parts.forEach((part, p) => {
-            if (!chosen[d][p]) return;
-            if (current && current.end === part.start) current.end = part.end;
-            else windows.push(current = { day, start: part.start, end: part.end });
-        });
-    });
-    const tooShort = windows.find((w) => w.end - w.start < minimum);
-    if (tooShort) {
-        problem.textContent = `On ${dayText(tooShort.day)}, that’s shorter than the ${duration(minimum)} event. Pick more of the day.`;
+    const windows = days.flatMap((day, d) => times[d].map((slot) => ({ day, start: slot.from, end: slot.until })));
+    const bad = days.find((_, d) => times[d].some((slot) => slotProblem(slot, minimum)));
+    if (bad) {
+        problem.textContent = `Check the times on ${dayText(bad)}.`;
         problem.hidden = false;
         return;
     }
@@ -436,10 +430,21 @@ function atMinute(day, minutes) {
     return date;
 }
 
-// Such as "5–10 PM".
-function spanText(part) {
-    const start = atMinute(new Date(2000, 0, 1), part.start), end = atMinute(new Date(2000, 0, 1), part.end);
-    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).formatRange(start, end);
+// Minutes after midnight on `day`, such as 1080 for 6 PM.
+function minutesOf(time, day) {
+    return Math.round((time - startOfDay(day)) / 60_000);
+}
+
+// "18:00" for a time input.
+function clockText(minutes) {
+    const m = Math.max(0, Math.min(minutes, 1439));
+    return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+
+// Minutes after midnight from a time input's "18:00", or nothing if it's empty.
+function clockMinutes(value) {
+    const [hours, minutes] = (value || "").split(":").map(Number);
+    return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : null;
 }
 
 function render(...children) {
