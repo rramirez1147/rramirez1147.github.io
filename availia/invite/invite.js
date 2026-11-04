@@ -269,7 +269,7 @@ function calendarFile(event, slot) {
     const lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//Availia//EN",
+        "PRODID:-//Eventos//EN",
         "BEGIN:VEVENT",
         `UID:${slot.id}@availia`,
         `DTSTAMP:${stamp(new Date().toISOString())}`,

@@ -1,4 +1,4 @@
-// The page group invite links open. Groups are for people with the Availia app, so this page shows
+// The page group invite links open. Groups are for people with the Eventos app, so this page shows
 // which group it is and hands the link to the app, which does the joining.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -26,13 +26,13 @@ async function start() {
     const open = document.createElement("a");
     open.className = "primary button";
     open.href = `availia://group?t=${encodeURIComponent(token)}`;
-    open.textContent = "Open in Availia";
+    open.textContent = "Open in Eventos";
 
     show(
         group.name,
-        `${group.owner_name || "A friend"} invited you to join this group on Availia. ${people}.`,
+        `${group.owner_name || "A friend"} invited you to join this group on Eventos. ${people}.`,
         open,
-        note("Groups let friends plan together in one tap. You’ll need the Availia app on your iPhone to join."),
+        note("Groups let friends plan together in one tap. You’ll need the Eventos app on your iPhone to join."),
     );
 }
 
