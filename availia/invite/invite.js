@@ -31,13 +31,6 @@ const state = {
     names: new Map(),   // participant id → name, for the Bring list
 };
 
-// Cover colors, matching the app. Only these known values are ever used in styles.
-const palettes = {
-    blue: ["#3d8fff", "#1f52db"], orange: ["#ffa845", "#f2612e"], pink: ["#ff8cb8", "#e04585"],
-    purple: ["#a87aff", "#6b40db"], green: ["#5cd17a", "#21945c"], teal: ["#47d1db", "#1a85a8"],
-    red: ["#ff6b66", "#d1293d"], gray: ["#8c94a3", "#4d5261"],
-};
-
 start();
 
 // MARK: - Flow
@@ -165,11 +158,16 @@ function showMain() {
     render(...parts);
 }
 
-// The invitation's cover: an emoji on the host's chosen colors.
+// The event's cover photo, like in the app. Events without one have no cover. The photo is
+// private, so it only loads once the guest has claimed their spot.
 function coverView(event) {
-    const [from, to] = palettes[event.cover_palette] ?? palettes.blue;
-    const cover = el("div", { class: "cover", "aria-hidden": "true" }, event.cover_emoji || "📅");
-    cover.style.background = `linear-gradient(135deg, ${from}, ${to})`;
+    if (!event.cover_image_path || !state.participantID) return null;
+    const cover = el("div", { class: "cover", "aria-hidden": "true" });
+    supabase.storage.from("event-covers").download(event.cover_image_path).then(({ data }) => {
+        if (!data) return cover.remove();
+        const image = el("img", { src: URL.createObjectURL(data), alt: "" });
+        cover.append(image);
+    });
     return cover;
 }
 
@@ -213,6 +211,11 @@ function detailsCard(event) {
         row("Dates", dateRange(event.search_start, event.search_end)),
         row("Length", duration(event.duration_minutes)),
     ];
+    // After the answer-by time, the host plans with whoever answered.
+    const answering = ["draft", "awaiting_availability", "recommendation_ready"].includes(event.status);
+    if (event.respond_by && answering && new Date(event.respond_by) > new Date()) {
+        rows.push(row("Answer By", new Date(event.respond_by).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })));
+    }
     if (event.location) {
         if (event.latitude != null && event.longitude != null) {
             // Apple Maps opens the Maps app on iPhone and a web map elsewhere.
@@ -452,7 +455,7 @@ async function recalculate() {
 // MARK: - Helpers
 
 function render(...children) {
-    app.replaceChildren(...children);
+    app.replaceChildren(...children.filter((c) => c !== null && c !== undefined));
 }
 
 // Builds an element. Text is always inserted as text, never as HTML.
